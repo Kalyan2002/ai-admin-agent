@@ -1,170 +1,297 @@
-# File: tools/aws_tool.py
+# File: main_agent.py
 """
-AWS integration layer for ai-admin-agent.
-Handles EC2, S3, CloudWatch, and Network metrics.
-Performs safe automation such as rebooting instances and inspecting networking.
-Requires boto3 and valid AWS credentials.
+AI-Admin-Agent: Main Orchestrator
+Integrates system monitor, Groq AI reasoning, and automated fix execution.
 """
 
-import boto3
-import datetime
-from typing import Dict, Any, List
+import argparse
+import os
+import sys
+from tools.email_tool import EmailTool
+import json
+from dotenv import load_dotenv
+from configs.defaults import Defaults
+from logdb import LogDB
+from monitor import Monitor
+from ai_controllers import AIController
+from tools.bash_tools import BashTool
+from tools.powershell_tools import PowerShellTool
+from tools.aws_tool import AWSTool
+
+load_dotenv()  # Auto-load GROQ_API_KEY and AWS credentials
 
 
-class AWSTool:
-    """Unified AWS operations utility for EC2, S3, CloudWatch, and networking."""
+# ----------------------------- INCIDENT HANDLER ----------------------------- #
 
-    def __init__(self, region: str = "us-east-1", dry_run: bool = True):
-        self.region = region
-        self.dry_run = dry_run
+def handle_incident(incident: dict, logdb: LogDB, ai: AIController,
+                    bash_tool: BashTool, ps_tool: PowerShellTool,
+                    aws_tool: AWSTool, email_tool: EmailTool):
+    """Process an incident: analyze via Groq AI → execute safe fix plan → log all actions."""
+    print("\n🚨 Incident detected:", incident)
+    incident_id = logdb.log_incident(incident)
 
-        try:
-            self.ec2 = boto3.client("ec2", region_name=self.region)
-            self.cloudwatch = boto3.client("cloudwatch", region_name=self.region)
-            self.s3 = boto3.client("s3", region_name=self.region)
-        except Exception as e:
-            raise RuntimeError(f"AWS client initialization failed: {e}")
+    # Send email immediately
+    email_tool.send_alert(
+        subject=f"🚨 AI Admin Agent Incident: {incident.get('type')}",
+        body=f"Incident details:\n{json.dumps(incident, indent=2)}"
+    )
 
-    # ---------------------- EC2 OPERATIONS ----------------------
+    plan = ai.generate_plan(incident)
+    print("\n🧠 AI Plan:", json.dumps(plan, indent=2))
+    logdb.log_action(incident_id, {"type": "plan_generated", "plan": plan})
 
-    def list_instances(self) -> Dict[str, Any]:
-        """List EC2 instances, states, and IP details."""
-        if self.dry_run:
-            return {"simulated": True, "action": "list_instances"}
+    for step in plan.get("steps", []):
+        tool = step.get("tool", "bash").lower()
+        command = step.get("command")
+        verify = step.get("verify", "")
+        risk = step.get("risk", "unknown")
 
-        try:
-            resp = self.ec2.describe_instances()
-            instances = []
-            for r in resp.get("Reservations", []):
-                for i in r.get("Instances", []):
-                    instances.append({
-                        "id": i.get("InstanceId"),
-                        "state": i.get("State", {}).get("Name"),
-                        "type": i.get("InstanceType"),
-                        "private_ip": i.get("PrivateIpAddress"),
-                        "public_ip": i.get("PublicIpAddress"),
-                        "vpc_id": i.get("VpcId"),
-                        "subnet_id": i.get("SubnetId"),
-                        "launch_time": str(i.get("LaunchTime"))
-                    })
-            return {"instances": instances}
-        except Exception as e:
-            return {"error": str(e)}
-
-    def reboot_instance(self, instance_id: str) -> Dict[str, Any]:
-        """Reboot an EC2 instance safely."""
-        if self.dry_run:
-            return {"simulated": True, "action": f"reboot_instance({instance_id})"}
+        print(f"\n➡️ Executing step ({risk} risk): {tool} → {command}")
+        result = {"error": "No tool executed"}
 
         try:
-            self.ec2.reboot_instances(InstanceIds=[instance_id])
-            return {"status": "reboot_initiated", "instance_id": instance_id}
+            if tool == "bash":
+                result = bash_tool.execute(command)
+            elif tool == "powershell":
+                result = ps_tool.execute(command)
+            elif tool == "aws":
+                result = execute_aws_action(command, aws_tool)
+            else:
+                result = {"error": f"Unknown tool: {tool}"}
         except Exception as e:
-            return {"error": str(e), "instance_id": instance_id}
+            result = {"error": str(e)}
 
-    def start_instance(self, instance_id: str) -> Dict[str, Any]:
-        """Start an EC2 instance."""
-        if self.dry_run:
-            return {"simulated": True, "action": f"start_instance({instance_id})"}
+        print("✅ Result:", result)
+        logdb.log_action(incident_id, {"tool": tool, "command": command, "verify": verify}, result)
 
+        print("\n🚨 Incident detected:", incident)
+        incident_id = logdb.log_incident(incident)
+        # ✅ Send email alert
+        subject = f"🚨 AI Admin Agent Alert: {incident.get('type', 'unknown').upper()}"
+        body = (
+            f"An incident has been detected by your AI Admin Agent.\n\n"
+            f"Details:\n"
+            f"Type: {incident.get('type')}\n"
+            f"Value: {incident.get('value', 'N/A')}\n"
+            f"Description: {incident.get('description', 'No description provided.')}\n\n"
+            f"This was automatically triggered from your monitoring system."
+        )
         try:
-            self.ec2.start_instances(InstanceIds=[instance_id])
-            return {"status": "start_initiated", "instance_id": instance_id}
+            email_tool.send_email(subject, body)
         except Exception as e:
-            return {"error": str(e), "instance_id": instance_id}
+            print(f"⚠️ Failed to send email alert: {e}")
 
-    def stop_instance(self, instance_id: str) -> Dict[str, Any]:
-        """Stop an EC2 instance."""
-        if self.dry_run:
-            return {"simulated": True, "action": f"stop_instance({instance_id})"}
 
+    return plan
+
+
+
+# ----------------------------- AWS LIVE STATUS ----------------------------- #
+
+def show_aws_status_live(region: str):
+    """Fetch and display live EC2 instance details, IPs, and metrics."""
+    print(f"\n🌍 Connecting to AWS region: {region} ...")
+    aws = AWSTool(region=region, dry_run=False)
+
+    data = aws.list_instances()
+    if "error" in data:
+        print(f"❌ {data['error']}")
+        return
+
+    instances = data.get("instances", [])
+    if not instances:
+        print("⚠️ No EC2 instances found in this region.")
+        return
+
+    print(f"\n🖥️ Found {len(instances)} EC2 instance(s):\n")
+
+    for i in instances:
+        print(f"• Instance ID: {i['id']}")
+        print(f"  State: {i['state']}")
+        print(f"  Type: {i['type']}")
+        print(f"  Launch Time: {i['launch_time']}")
+        print(f"  VPC: {i.get('vpc_id')}")
+        print(f"  Subnet: {i.get('subnet_id')}")
+        print(f"  Private IP: {i.get('private_ip')}")
+        print(f"  Public IP: {i.get('public_ip')}")
+
+        if i["state"] == "running":
+            net_info = aws.get_network_details(i["id"])
+            metrics = aws.get_network_metrics(i["id"])
+            print(f"  🌐 Security Groups: {net_info.get('SecurityGroups')}")
+            print(f"  📊 Network In: {metrics.get('NetworkIn_Bytes')} bytes")
+            print(f"  📤 Network Out: {metrics.get('NetworkOut_Bytes')} bytes")
+        print("-" * 70)
+
+
+# ----------------------------- AWS HELPER ----------------------------- #
+
+def execute_aws_action(command: str, aws_tool: AWSTool) -> dict:
+    """Interpret and safely execute AWS commands suggested by AI."""
+    cmd = command.lower().split()
+    if not cmd:
+        return {"error": "Invalid AWS command"}
+
+    action = cmd[0]
+    target = cmd[-1] if len(cmd) > 1 else None
+
+    if action in ("reboot_instance", "reboot") and target:
+        return aws_tool.reboot_instance(target)
+    elif action in ("start_instance", "start") and target:
+        return aws_tool.start_instance(target)
+    elif action in ("stop_instance", "stop") and target:
+        return aws_tool.stop_instance(target)
+    elif action in ("list_instances", "list"):
+        return aws_tool.list_instances()
+    else:
+        return {"warning": f"Unknown AWS action: {command}"}
+
+
+# ----------------------------- SIMPLE CLI COMMANDS ----------------------------- #
+
+def simple_cli_action(action: str, target: str = None):
+    """Simple CLI: start/stop/reboot/status for EC2 by name or ID."""
+    region = os.getenv("AWS_REGION", "us-east-1")
+    aws = AWSTool(region=region, dry_run=False)
+
+    if action == "status":
+        print("\n🔍 Fetching live EC2 status...\n")
+        show_aws_status_live(region)
+        return
+
+    if not target:
+        print("❌ You must specify an instance name or ID.")
+        return
+
+    instance_id = aws.find_instance_by_name(target)
+    if not instance_id:
+        print(f"❌ Could not find instance named or matching '{target}'")
+        return
+
+    print(f"🖥️ Target Instance: {instance_id}")
+
+    if action == "restart":
+        result = aws.reboot_instance(instance_id)
+    elif action == "start":
+        result = aws.start_instance(instance_id)
+    elif action == "stop":
+        result = aws.stop_instance(instance_id)
+    else:
+        print(f"❌ Unknown action: {action}")
+        return
+
+    print(f"✅ {action.capitalize()} result:", result)
+
+
+# ----------------------------- COMPONENT BUILDER ----------------------------- #
+
+def build_components(config: Defaults, dry_run: bool):
+    os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
+    logdb = LogDB(config.DB_PATH)
+    ai = AIController(api_key=os.getenv("GROQ_API_KEY"), dry_run=dry_run)
+    bash_tool = BashTool(list(config.COMMAND_WHITELIST), dry_run=dry_run)
+    ps_tool = PowerShellTool(list(config.COMMAND_WHITELIST), dry_run=dry_run)
+    aws_tool = AWSTool(region=os.getenv("AWS_REGION", "us-east-1"), dry_run=dry_run)
+
+    # ✅ Email notifier setup
+    email_tool = EmailTool(
+        sender=os.getenv("EMAIL_SENDER"),
+        password=os.getenv("EMAIL_PASSWORD"),
+        receiver=os.getenv("EMAIL_RECEIVER"),
+        smtp_server=os.getenv("SMTP_SERVER", "smtp.gmail.com"),
+        smtp_port=int(os.getenv("SMTP_PORT", 587))
+    )
+
+    return logdb, ai, bash_tool, ps_tool, aws_tool, email_tool
+
+
+
+
+# ----------------------------- MAIN ENTRYPOINT ----------------------------- #
+
+def main():
+    parser = argparse.ArgumentParser(prog="ai-admin-agent", description="AI-powered system administration agent")
+    parser.add_argument("action", nargs="?", help="Action: start | stop | restart | status | monitor")
+    parser.add_argument("target", nargs="?", help="Instance name or ID")
+    parser.add_argument("--ask", type=str, help="Ask AI to interpret and execute your instruction")
+    parser.add_argument("--dry-run", action="store_true", help="Run in dry-run mode (no destructive actions)")
+    parser.add_argument("--monitor", action="store_true", help="Start continuous monitoring")
+    parser.add_argument("--run-once", action="store_true", help="Run a single monitoring check and exit")
+    parser.add_argument("--incident-json", type=str, help="Pass an incident JSON manually")
+    parser.add_argument("--show-logs", action="store_true", help="Display recent incidents and actions")
+    parser.add_argument("--aws-status-live", action="store_true", help="Show live AWS EC2 instances and metrics")
+    args = parser.parse_args()
+
+    config = Defaults()
+    dry_run = args.dry_run or os.getenv("AI_DRY_RUN", "true").lower() in ("true", "1")
+
+    logdb, ai, bash_tool, ps_tool, aws_tool, email_tool = build_components(config, dry_run)
+
+    # --- Simple CLI commands ---
+    if args.action in ["restart", "start", "stop", "status"]:
+        simple_cli_action(args.action, args.target)
+        return
+
+    # --- Natural AI Command Mode ---
+    if args.ask:
+        prompt = args.ask
+        print(f"\n🧠 AI interpreting your request: {prompt}\n")
+        plan = ai.generate_plan({"type": "user_request", "prompt": prompt})
+        print("🧩 AI Plan:", json.dumps(plan, indent=2))
+
+        for step in plan.get("steps", []):
+            tool = step.get("tool")
+            cmd = step.get("command")
+            print(f"\n➡️ Executing: {tool} → {cmd}")
+
+            if tool == "aws":
+                result = execute_aws_action(cmd, aws_tool)
+            elif tool == "bash":
+                result = bash_tool.execute(cmd)
+            elif tool == "powershell":
+                result = ps_tool.execute(cmd)
+            else:
+                result = {"warning": "Unknown tool type"}
+
+            print("✅ Result:", result)
+        return
+
+    # --- AWS live status ---
+    if args.aws_status_live:
+        show_aws_status_live(os.getenv("AWS_REGION", "us-east-1"))
+        return
+
+    # --- Show logs ---
+    if args.show_logs:
+        print("\n📜 Recent Incidents:")
+        for inc in logdb.get_recent_incidents():
+            print(json.dumps(inc, indent=2))
+        return
+
+    # --- Manual incident ---
+    if args.incident_json:
         try:
-            self.ec2.stop_instances(InstanceIds=[instance_id])
-            return {"status": "stop_initiated", "instance_id": instance_id}
-        except Exception as e:
-            return {"error": str(e), "instance_id": instance_id}
+            incident = json.loads(args.incident_json)
+            handle_incident(incident, logdb, ai, bash_tool, ps_tool, aws_tool)
+        except json.JSONDecodeError:
+            print("❌ Invalid JSON format for --incident-json")
+        return
 
-    # ---------------------- NETWORK INFO ----------------------
+    # --- Monitor mode ---
+    monitor = Monitor(config, lambda inc: handle_incident(inc, logdb, ai, bash_tool, ps_tool, aws_tool, email_tool))
 
-    def get_network_details(self, instance_id: str) -> Dict[str, Any]:
-        """Fetch VPC, subnet, and security group info for a given instance."""
-        if self.dry_run:
-            return {"simulated": True, "action": f"get_network_details({instance_id})"}
+    if args.monitor:
+        if args.run_once:
+            print("🧩 Running one-time system + AWS health check...")
+            monitor._check_all()
+            print("✅ Single monitor check complete.")
+        else:
+            print("🛰️ Starting continuous monitoring — press Ctrl+C to stop.")
+            monitor.run_forever()
+    else:
+        parser.print_help()
 
-        try:
-            desc = self.ec2.describe_instances(InstanceIds=[instance_id])
-            i = desc["Reservations"][0]["Instances"][0]
-            network_info = {
-                "InstanceId": instance_id,
-                "PrivateIP": i.get("PrivateIpAddress"),
-                "PublicIP": i.get("PublicIpAddress"),
-                "VPCId": i.get("VpcId"),
-                "SubnetId": i.get("SubnetId"),
-                "SecurityGroups": [sg["GroupName"] for sg in i.get("SecurityGroups", [])]
-            }
-            return network_info
-        except Exception as e:
-            return {"error": str(e), "instance_id": instance_id}
 
-    # ---------------------- CLOUDWATCH NETWORK METRICS ----------------------
 
-    def get_network_metrics(self, instance_id: str) -> Dict[str, Any]:
-        """Get network in/out usage from CloudWatch (last 30 minutes)."""
-        if self.dry_run:
-            return {"simulated": True, "action": f"get_network_metrics({instance_id})"}
-
-        try:
-            end_time = datetime.datetime.utcnow()
-            start_time = end_time - datetime.timedelta(minutes=30)
-
-            metrics = {}
-            for direction in ["NetworkIn", "NetworkOut"]:
-                data = self.cloudwatch.get_metric_statistics(
-                    Namespace="AWS/EC2",
-                    MetricName=direction,
-                    Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
-                    StartTime=start_time,
-                    EndTime=end_time,
-                    Period=300,
-                    Statistics=["Sum"],
-                    Unit="Bytes"
-                )
-                datapoints = sorted(data.get("Datapoints", []), key=lambda x: x["Timestamp"])
-                metrics[direction] = datapoints[-1]["Sum"] if datapoints else 0
-
-            return {
-                "InstanceId": instance_id,
-                "NetworkIn_Bytes": metrics.get("NetworkIn", 0),
-                "NetworkOut_Bytes": metrics.get("NetworkOut", 0),
-                "PeriodMinutes": 30
-            }
-        except Exception as e:
-            return {"error": str(e), "instance_id": instance_id}
-
-    # ---------------------- S3 OPERATIONS ----------------------
-
-    def list_s3_buckets(self) -> Dict[str, Any]:
-        """List all S3 buckets."""
-        if self.dry_run:
-            return {"simulated": True, "action": "list_s3_buckets"}
-
-        try:
-            resp = self.s3.list_buckets()
-            buckets = [b["Name"] for b in resp.get("Buckets", [])]
-            return {"buckets": buckets}
-        except Exception as e:
-            return {"error": str(e)}
-
-    def create_s3_bucket(self, bucket_name: str) -> Dict[str, Any]:
-        """Create an S3 bucket."""
-        if self.dry_run:
-            return {"simulated": True, "action": f"create_s3_bucket({bucket_name})"}
-
-        try:
-            self.s3.create_bucket(
-                Bucket=bucket_name,
-                CreateBucketConfiguration={"LocationConstraint": self.region}
-            )
-            return {"status": "bucket_created", "bucket_name": bucket_name}
-        except Exception as e:
-            return {"error": str(e), "bucket_name": bucket_name}
+if __name__ == "__main__":
+    main()
