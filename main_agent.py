@@ -30,16 +30,18 @@ def handle_incident(incident: dict, logdb: LogDB, ai: AIController,
     print("\n🚨 Incident detected:", incident)
     incident_id = logdb.log_incident(incident)
 
-    # Send email immediately
-    email_tool.send_alert(
+    # ✅ Send one email per incident (not per step)
+    email_tool.send_email(
         subject=f"🚨 AI Admin Agent Incident: {incident.get('type')}",
         body=f"Incident details:\n{json.dumps(incident, indent=2)}"
     )
 
+    # Generate AI plan
     plan = ai.generate_plan(incident)
     print("\n🧠 AI Plan:", json.dumps(plan, indent=2))
     logdb.log_action(incident_id, {"type": "plan_generated", "plan": plan})
 
+    # Execute each step
     for step in plan.get("steps", []):
         tool = step.get("tool", "bash").lower()
         command = step.get("command")
@@ -64,25 +66,9 @@ def handle_incident(incident: dict, logdb: LogDB, ai: AIController,
         print("✅ Result:", result)
         logdb.log_action(incident_id, {"tool": tool, "command": command, "verify": verify}, result)
 
-        print("\n🚨 Incident detected:", incident)
-        incident_id = logdb.log_incident(incident)
-        # ✅ Send email alert
-        subject = f"🚨 AI Admin Agent Alert: {incident.get('type', 'unknown').upper()}"
-        body = (
-            f"An incident has been detected by your AI Admin Agent.\n\n"
-            f"Details:\n"
-            f"Type: {incident.get('type')}\n"
-            f"Value: {incident.get('value', 'N/A')}\n"
-            f"Description: {incident.get('description', 'No description provided.')}\n\n"
-            f"This was automatically triggered from your monitoring system."
-        )
-        try:
-            email_tool.send_email(subject, body)
-        except Exception as e:
-            print(f"⚠️ Failed to send email alert: {e}")
-
-
+    print("\n📘 Incident complete. Logged to database.\n")
     return plan
+
 
 
 
@@ -272,7 +258,8 @@ def main():
     if args.incident_json:
         try:
             incident = json.loads(args.incident_json)
-            handle_incident(incident, logdb, ai, bash_tool, ps_tool, aws_tool)
+            handle_incident(incident, logdb, ai, bash_tool, ps_tool, aws_tool, email_tool)
+
         except json.JSONDecodeError:
             print("❌ Invalid JSON format for --incident-json")
         return
