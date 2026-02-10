@@ -20,5 +20,6 @@ COMMAND_WHITELIST: tuple = (
     "/usr/bin/du", "/usr/bin/find", "/usr/bin/awk", "/usr/bin/sort",
     "/usr/bin/head", "/usr/bin/tail", "/usr/bin/df", "/usr/bin/xargs",
     "/usr/bin/systemctl", "/usr/bin/journalctl", "/usr/sbin/logrotate",
-    "/usr/bin/apt-get", "/usr/bin/docker", "/usr/bin/sudo"
+    "/usr/bin/apt-get", "/usr/bin/docker", "/usr/bin/sudo","ls",
+    "df","uptime","ps","az",
 )
