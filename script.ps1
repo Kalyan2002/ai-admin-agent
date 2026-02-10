@@ -52,3 +52,7 @@ python main_agent.py --monitor --run-once --dry-run
 # 7️⃣ Start INTERACTIVE MODE (recommended)
 # -------------------------------------------------------------------
 python main_agent.py --interactive
+# In interactive mode, you can type commands like:
+# "List all Azure VMs"
+# "Show me the top 5 processes on the server"
+# "What is the disk usage on the server?"
