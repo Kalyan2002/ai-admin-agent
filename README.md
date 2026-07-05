@@ -1,6 +1,6 @@
 # ai-admin-agent
 
-An AI-powered incident management system that monitors system health, detects issues like high CPU or low disk space, and sends incident data to an agent that uses MODEL to generate a diagnosis and a fix plan. Safe steps with confidence scores above 0.7 are executed automatically, while others require manual approval through a CLI.
+An AI-powered incident management system that monitors system health across local, AWS, and Azure resources, detects issues like high CPU or low disk space, and sends incident data to an agent (Groq-hosted `gpt-oss-20b`) to generate a diagnosis and a fix plan. Steps with confidence scores above 0.7 are executed automatically (bash/PowerShell/AWS/Azure actions, behind a command whitelist and dry-run mode), while lower-confidence plans are surfaced for manual review instead of executed. Also available as an interactive CLI (`--ask` / `--interactive`) for ad-hoc admin requests outside the monitoring loop.
 
 ## Quickstart (local)
 

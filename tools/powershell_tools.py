@@ -1,7 +1,5 @@
-# File: tools/powershell_tool.py
 """
-Path: tools/powershell_tool.py
-Placeholder PowerShell execution wrapper. On Windows, uses 'powershell' or 'pwsh' if available.
+PowerShell execution wrapper. On Windows, uses 'powershell' or 'pwsh' if available.
 """
 import subprocess
 from typing import Dict, Any, List

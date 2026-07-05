@@ -1,6 +1,4 @@
-# File: tools/bash_tool.py
 """
-Path: tools/bash_tool.py
 Executes bash commands with dry-run and whitelist checks.
 """
 import shlex

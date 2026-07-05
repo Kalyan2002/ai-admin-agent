@@ -127,7 +127,26 @@ def execute_azure_action(command: str, azure_tool: AzureTool) -> dict:
     return {"warning": f"Unknown Azure action: {command}"}
 
 
+def dispatch_step(step: dict, tools: dict) -> dict:
+    """Execute one AI-generated plan step against the tool it names."""
+    tool = step.get("tool", "").lower()
+    command = step.get("command")
 
+    print(f"\n➡️ Executing: {tool} → {command}")
+
+    if tool == "aws":
+        result = execute_aws_action(command, tools["aws"])
+    elif tool == "azure":
+        result = execute_azure_action(command, tools["azure"])
+    elif tool == "bash":
+        result = tools["bash"].execute(command)
+    elif tool == "powershell":
+        result = tools["powershell"].execute(command)
+    else:
+        result = {"error": f"Unknown tool: {tool}"}
+
+    print("✅ Result:", result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -159,24 +178,9 @@ def handle_incident(
         print("⚠️ Low confidence plan — refusing to execute.")
         return plan
 
+    tools = {"aws": aws_tool, "azure": azure_tool, "bash": bash_tool, "powershell": ps_tool}
     for step in plan.get("steps", []):
-        tool = step.get("tool", "").lower()
-        command = step.get("command")
-
-        print(f"\n➡️ Executing: {tool} → {command}")
-
-        if tool == "aws":
-            result = execute_aws_action(command, aws_tool)
-        elif tool == "azure":
-            result = execute_azure_action(command, azure_tool)
-        elif tool == "bash":
-            result = bash_tool.execute(command)
-        elif tool == "powershell":
-            result = ps_tool.execute(command)
-        else:
-            result = {"error": f"Unknown tool: {tool}"}
-
-        print("✅ Result:", result)
+        result = dispatch_step(step, tools)
         logdb.log_action(incident_id, step, result)
 
     return plan
@@ -248,18 +252,12 @@ def main():
         email_tool,
     ) = build_components(config, dry_run)
 
-    # ---- AI COMMAND MODE ----
+    tools = {"aws": aws_tool, "azure": azure_tool, "bash": bash_tool, "powershell": ps_tool}
+
     # ---- INTERACTIVE MODE ----
     if args.interactive:
-        interactive_loop(
-            ai,
-            bash_tool,
-            ps_tool,
-            aws_tool,
-            azure_tool,
-        )
+        interactive_loop(ai, tools)
         return
-
 
     if args.ask:
         print(f"\n🧠 AI interpreting: {args.ask}\n")
@@ -271,23 +269,7 @@ def main():
             return
 
         for step in plan.get("steps", []):
-            tool = step.get("tool", "").lower()
-            command = step.get("command")
-
-            print(f"\n➡️ Executing: {tool} → {command}")
-
-            if tool == "aws":
-                result = execute_aws_action(command, aws_tool)
-            elif tool == "azure":
-                result = execute_azure_action(command, azure_tool)
-            elif tool == "bash":
-                result = bash_tool.execute(command)
-            elif tool == "powershell":
-                result = ps_tool.execute(command)
-            else:
-                result = {"error": f"Unknown tool: {tool}"}
-
-            print("✅ Result:", result)
+            dispatch_step(step, tools)
 
         return
 
@@ -315,7 +297,7 @@ def main():
 
     parser.print_help()
 
-def interactive_loop(ai, bash_tool, ps_tool, aws_tool, azure_tool):
+def interactive_loop(ai, tools):
     print("\n🧠 AI Admin Agent (interactive mode)")
     print("Type 'exit' or 'quit' to stop\n")
 
@@ -346,23 +328,7 @@ def interactive_loop(ai, bash_tool, ps_tool, aws_tool, azure_tool):
             continue
 
         for step in plan.get("steps", []):
-            tool = step.get("tool", "").lower()
-            command = step.get("command")
-
-            print(f"\n➡️ Executing: {tool} → {command}")
-
-            if tool == "aws":
-                result = execute_aws_action(command, aws_tool)
-            elif tool == "azure":
-                result = execute_azure_action(command, azure_tool)
-            elif tool == "bash":
-                result = bash_tool.execute(command)
-            elif tool == "powershell":
-                result = ps_tool.execute(command)
-            else:
-                result = {"error": f"Unknown tool: {tool}"}
-
-            print("✅ Result:", result)
+            dispatch_step(step, tools)
 
         print()
 
